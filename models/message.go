@@ -3,6 +3,7 @@ package models
 import "time"
 
 type Message struct {
+	MsgID    string
 	Username string
 	Message  string
 	PubTime  time.Time

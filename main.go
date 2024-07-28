@@ -1,16 +1,27 @@
 package main
 
 import (
+	"ChatTwo/initializers"
 	"ChatTwo/models"
+	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/streadway/amqp"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"log"
 	"net/http"
 	"sync"
 	"time"
 )
+
+func init() {
+	initializers.Loadenv()
+	initializers.ConnectDB()
+}
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
@@ -162,6 +173,33 @@ func handleClient(c *gin.Context) {
 	clients[conn] = roomId
 	clientsMutex.Unlock()
 
+	// Retrieve last 50 messages from MongoDB
+	var messages []models.Message
+	collectionName := "CollegeName/Community/Messages/"
+	pathDb := initializers.Client.Database("Atmos").Collection(collectionName)
+	opts := options.Find()
+	opts.SetSort(bson.D{{"pubtime", -1}})
+	opts.SetLimit(50)
+
+	cursor, err := pathDb.Find(context.TODO(), bson.M{"roomid": roomId}, opts)
+	if err != nil {
+		log.Println("Error retrieving messages: ", err)
+	} else {
+		err = cursor.All(context.TODO(), &messages)
+		if err != nil {
+			log.Println("Error decoding messages: ", err)
+		} else {
+			// Send messages to the new client
+			for i := len(messages) - 1; i >= 0; i-- { // Reverse order to send oldest first
+				err = conn.WriteJSON(messages[i])
+				if err != nil {
+					log.Println("Error sending message: ", err)
+					break
+				}
+			}
+		}
+	}
+
 	for {
 		var msg models.Message
 		err := conn.ReadJSON(&msg)
@@ -173,7 +211,7 @@ func handleClient(c *gin.Context) {
 			return
 		}
 		log.Printf("Received message: %+v\n", msg)
-
+		msg.MsgID = uuid.New().String()
 		msg.PubTime = time.Now()
 		msg.RoomID = roomId // Ensure the message has the RoomID
 		body, err := json.Marshal(msg)
@@ -197,5 +235,21 @@ func handleClient(c *gin.Context) {
 		if err != nil {
 			log.Println("Failed to publish a message: ", err)
 		}
+		clientsMutex.Lock()
+		addDoc(c, &msg)
+		clientsMutex.Unlock()
+	}
+}
+
+func addDoc(c *gin.Context, msgPtr *models.Message) {
+	collectionName := "CollegeName/Community/Messages/"
+	pathDb := initializers.Client.Database("Atmos").Collection(collectionName)
+	_, err := pathDb.InsertOne(context.TODO(), &msgPtr)
+	if err != nil {
+		fmt.Println("Failed to add document: ", err)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
+		return
 	}
 }
